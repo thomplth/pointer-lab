@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>PointerLab</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0b0b0d; color: #e6e6e6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overscroll-behavior: none; touch-action: none; user-select: none;
+    -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  #verdict {
+    padding: 10px 12px; font-size: 15px; font-weight: 700; line-height: 1.3;
+    border-bottom: 2px solid #000;
+  }
+  .grey  { background: #2a2a2e; color: #cfcfcf; }
+  .green { background: #0f5132; color: #d1ffe3; }
+  .red   { background: #5c1a1a; color: #ffd6d6; }
+  .grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: #000;
+  }
+  .card { background: #141418; padding: 8px 10px; }
+  .card .k { font-size: 11px; color: #8a8a90; text-transform: uppercase; letter-spacing: .04em; }
+  .card .v { font-size: 24px; font-weight: 700; margin-top: 2px; }
+  .card .u { font-size: 11px; color: #8a8a90; }
+  .v.hot { color: #7CFFB0; }
+  .v.cap { color: #ff8a8a; }
+  #meta { font-size: 11px; color: #8a8a90; padding: 6px 10px; }
+  #meta b { color: #cfcfcf; }
+  .bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
+  button {
+    background: #26262c; color: #e6e6e6; border: 1px solid #3a3a42; border-radius: 6px;
+    padding: 8px 14px; font: inherit; font-size: 13px;
+  }
+  button:active { background: #34343c; }
+  #hist { font-size: 11px; color: #b7b7bd; padding: 2px 10px 6px; white-space: pre; }
+  #c {
+    display: block; width: 100%; height: 42vh; background: #060608;
+    border-top: 1px solid #222; border-bottom: 1px solid #222; touch-action: none;
+  }
+  .legend { display: flex; gap: 14px; padding: 5px 10px; font-size: 11px; color: #9a9aa2; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
+  #log {
+    margin: 0; padding: 6px 10px; font-size: 10.5px; line-height: 1.35;
+    color: #9fe0ff; background: #060608; white-space: pre-wrap; word-break: break-word;
+    max-height: 16vh; overflow: hidden;
+  }
+</style>
+</head>
+<body>
+  <div id="verdict" class="grey">Draw continuously with the S-Pen to measure…</div>
+
+  <div class="grid">
+    <div class="card"><div class="k">pointermove</div><div class="v" id="pm">0</div><div class="u">events / s</div></div>
+    <div class="card"><div class="k">coalesced Σ</div><div class="v" id="co">0</div><div class="u">samples / s</div></div>
+    <div class="card"><div class="k">coalesced / move</div><div class="v" id="perMove">0</div><div class="u">avg</div></div>
+    <div class="card"><div class="k">pointerrawupdate</div><div class="v" id="raw">0</div><div class="u">events / s</div></div>
+    <div class="card"><div class="k">rAF display</div><div class="v" id="fps">0</div><div class="u">Hz</div></div>
+    <div class="card"><div class="k">pen Hz (coalesced)</div><div class="v" id="coHz">—</div><div class="u">median Δt</div></div>
+    <div class="card"><div class="k">pen Hz (rawupdate)</div><div class="v" id="rawHz">—</div><div class="u">median Δt</div></div>
+    <div class="card"><div class="k">predicted</div><div class="v" id="predicted">0</div><div class="u">events</div></div>
+  </div>
+
+  <div id="hist">Δt histogram: (draw to populate)</div>
+  <div id="meta"></div>
+
+  <div class="bar">
+    <button id="reset">Reset</button>
+    <span id="secure" style="font-size:12px;color:#9a9aa2"></span>
+  </div>
+
+  <div class="legend">
+    <span><span class="swatch" style="background:#ffffff"></span>main</span>
+    <span><span class="swatch" style="background:#39c5ff"></span>coalesced</span>
+    <span><span class="swatch" style="background:#ff4d4d"></span>rawupdate</span>
+  </div>
+  <canvas id="c"></canvas>
+  <pre id="log"></pre>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var canvas = $("c");
+  var ctx = canvas.getContext("2d");
+  var canvasRect = null;
+
+  function resize() {
+    var dpr = window.devicePixelRatio || 1;
+    var w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    canvasRect = canvas.getBoundingClientRect();
+  }
+
+  // ---- rolling log, mirrored to console (Samsung Internet pipes console.* to logcat tag `chromium`) ----
+  // rolling on-screen log; also mirrored to console.log (Chromium pipes console.* to logcat, tag `chromium`)
+  var logLines = [];
+  function log(msg) {
+    var line = "[" + (performance.now() / 1000).toFixed(2) + "s] " + msg;
+    logLines.push(line);
+    while (logLines.length > 14) logLines.shift();
+    $("log").textContent = logLines.join("\n");
+    console.log("[PointerLab] " + msg);
+  }
+
+  // ---- per-1s window counters ----
+  var pmCount = 0, coalescedCount = 0, rawCount = 0, frameCount = 0, lastPredictedLen = 0;
+  var coalescedTs = [], rawTs = [];
+  var lastPointerType = "-";
+  var everSawRaw = false;
+
+  // ---- rAF display-rate probe ----
+  function raf() { frameCount++; requestAnimationFrame(raf); }
+  requestAnimationFrame(raf);
+
+  // ---- drawing ----
+  function dot(x, y, color, r) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 6.2832);
+    ctx.fill();
+  }
+  function toLocal(e) {
+    var r = canvasRect || canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  }
+
+  function onDown(e) {
+    canvasRect = canvas.getBoundingClientRect();
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    lastPointerType = e.pointerType || "-";
+    var p = toLocal(e);
+    dot(p[0], p[1], "#ffffff", 1.2);
+    log("pointerdown type=" + lastPointerType + " secure=" + window.isSecureContext);
+  }
+
+  function onMove(e) {
+    pmCount++;
+    lastPointerType = e.pointerType || "-";
+    var coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    coalescedCount += coalesced.length;
+    for (var i = 0; i < coalesced.length; i++) {
+      var ce = coalesced[i];
+      coalescedTs.push(ce.timeStamp);
+      var q = toLocal(ce);
+      dot(q[0], q[1], "#39c5ff", 1.5);
+    }
+    var m = toLocal(e);
+    dot(m[0], m[1], "#ffffff", 0.9);
+    if (e.getPredictedEvents) {
+      try { lastPredictedLen = e.getPredictedEvents().length; } catch (_) {}
+    }
+  }
+
+  function onRaw(e) {
+    rawCount++;
+    everSawRaw = true;
+    rawTs.push(e.timeStamp);
+    // pointerrawupdate can itself carry coalesced sub-samples; draw them all.
+    var coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (var i = 0; i < coalesced.length; i++) {
+      var q = toLocal(coalesced[i]);
+      dot(q[0], q[1], "#ff4d4d", 2.2);
+    }
+  }
+
+  function onUp(e) {
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+
+  canvas.addEventListener("pointerdown", onDown, { passive: true });
+  canvas.addEventListener("pointermove", onMove, { passive: true });
+  canvas.addEventListener("pointerrawupdate", onRaw, { passive: true });
+  canvas.addEventListener("pointerup", onUp, { passive: true });
+  canvas.addEventListener("pointercancel", onUp, { passive: true });
+
+  // ---- Hz math: inter-timestamp deltas → 1/Δ → snap to the nearest supported rate ----
+  var RATES = [60, 120, 240, 360, 480];
+  function snapHz(hz) {
+    var best = RATES[0], bd = Infinity;
+    for (var i = 0; i < RATES.length; i++) {
+      var d = Math.abs(RATES[i] - hz);
+      if (d < bd) { bd = d; best = RATES[i]; }
+    }
+    return bd <= 50 ? best : Math.round(hz);
+  }
+  function medianHz(tsArr) {
+    if (tsArr.length < 3) return 0;
+    var deltas = [];
+    for (var i = 1; i < tsArr.length; i++) {
+      var d = tsArr[i] - tsArr[i - 1];
+      if (d > 0) deltas.push(d);
+    }
+    if (!deltas.length) return 0;
+    deltas.sort(function (a, b) { return a - b; });
+    var md = deltas[Math.floor(deltas.length / 2)];
+    return md > 0 ? 1000 / md : 0;
+  }
+  function histogram(tsArr) {
+    // classify each inter-sample gap to the nearest supported rate
+    var buckets = { 60: 0, 120: 0, 240: 0, 360: 0, 480: 0, other: 0 };
+    for (var i = 1; i < tsArr.length; i++) {
+      var d = tsArr[i] - tsArr[i - 1];
+      if (d <= 0) continue;
+      var hz = 1000 / d, snapped = snapHz(hz);
+      if (buckets[snapped] !== undefined && Math.abs(snapped - hz) <= 50) buckets[snapped]++;
+      else buckets.other++;
+    }
+    return buckets;
+  }
+
+  function setV(id, val, cls) {
+    var el = $(id);
+    el.textContent = val;
+    el.className = "v" + (cls ? " " + cls : "");
+  }
+
+  function updateVerdict(pm, co, rw, fps) {
+    var v = $("verdict");
+    if (pm < 5) { v.className = "grey"; v.textContent = "Draw continuously with the S-Pen to measure…"; return; }
+    var display = fps || 60;
+    var best = Math.max(rw, co);
+    if (best > 1.8 * display) {
+      var via = rw >= co ? "pointerrawupdate" : "summing getCoalescedEvents()";
+      v.className = "green";
+      v.textContent = "RECOVERABLE — high-rate stream reachable ~" + Math.round(best) +
+        "Hz via " + via + " (display ~" + display + "Hz).";
+    } else {
+      v.className = "red";
+      v.textContent = "CAPPED — best stream ~" + Math.round(best) + "Hz ≈ display " + display +
+        "Hz. pm/s=" + pm + " coalesced/s=" + co + " raw/s=" + rw + ". ~1 sample/frame reaches JS.";
+    }
+  }
+
+  setInterval(function () {
+    var pm = pmCount, co = coalescedCount, rw = rawCount, fps = frameCount;
+    var perMove = pm > 0 ? (co / pm) : 0;
+    var coHz = medianHz(coalescedTs);
+    var rwHz = medianHz(rawTs);
+    var display = fps || 60;
+
+    setV("pm", pm);
+    setV("co", co, co > 1.8 * display ? "hot" : "");
+    setV("perMove", perMove.toFixed(2), perMove >= 3 ? "hot" : (pm > 5 ? "cap" : ""));
+    setV("raw", rw, rw > 1.8 * display ? "hot" : (pm > 5 && everSawRaw ? "cap" : ""));
+    setV("fps", fps);
+    setV("coHz", co > 0 ? snapHz(coHz) : "—");
+    setV("rawHz", rw > 0 ? snapHz(rwHz) : (everSawRaw ? "—" : "n/a"));
+    setV("predicted", lastPredictedLen);
+
+    var b = histogram(coalescedTs.length >= rawTs.length ? coalescedTs : rawTs);
+    $("hist").textContent = "Δt→Hz histogram (best stream): " +
+      "60:" + b[60] + "  120:" + b[120] + "  240:" + b[240] + "  360:" + b[360] + "  480:" + b[480] + "  other:" + b.other;
+
+    updateVerdict(pm, co, rw, fps);
+
+    if (pm > 0) {
+      log("pm/s=" + pm + " coalescedΣ/s=" + co + " (/move=" + perMove.toFixed(2) + ")" +
+        " raw/s=" + rw + " rAF=" + fps + "Hz penHz(co)=" + (co ? snapHz(coHz) : "-") +
+        " penHz(raw)=" + (rw ? snapHz(rwHz) : "-") + " type=" + lastPointerType);
+    }
+
+    pmCount = 0; coalescedCount = 0; rawCount = 0; frameCount = 0;
+    coalescedTs = []; rawTs = [];
+  }, 1000);
+
+  $("reset").addEventListener("click", function () {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    pmCount = coalescedCount = rawCount = frameCount = lastPredictedLen = 0;
+    coalescedTs = []; rawTs = []; everSawRaw = false;
+    logLines = []; $("log").textContent = "";
+    log("reset");
+  });
+
+  // ---- meta / capability line ----
+  function refreshMeta() {
+    $("meta").innerHTML =
+      "UA: <b>" + navigator.userAgent + "</b>";
+    var rawSupported = ("onpointerrawupdate" in window) || ("onpointerrawupdate" in HTMLElement.prototype);
+    $("secure").textContent =
+      "isSecureContext=" + window.isSecureContext +
+      " | pointerrawupdate " + (rawSupported ? "supported" : "NOT ADVERTISED (will confirm by drawing)") +
+      " | dpr=" + (window.devicePixelRatio || 1) +
+      " | " + window.innerWidth + "x" + window.innerHeight;
+  }
+
+  window.addEventListener("resize", function () { resize(); refreshMeta(); });
+  resize();
+  refreshMeta();
+  log("loaded. secure=" + window.isSecureContext + " ua=" + navigator.userAgent);
+})();
+</script>
+</body>
+</html>
