@@ -79,6 +79,7 @@
     <span><span class="swatch" style="background:#ffffff"></span>main</span>
     <span><span class="swatch" style="background:#39c5ff"></span>coalesced</span>
     <span><span class="swatch" style="background:#ff4d4d"></span>rawupdate</span>
+    <span><span class="swatch" style="background:transparent;border:2px solid #ffcf4d;width:8px;height:8px"></span>predicted</span>
   </div>
   <canvas id="c"></canvas>
   <pre id="log"></pre>
@@ -128,6 +129,14 @@
     ctx.arc(x, y, r, 0, 6.2832);
     ctx.fill();
   }
+  // predicted points are *future* positions, not real samples — draw as hollow rings
+  function ring(x, y, color, r) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 6.2832);
+    ctx.stroke();
+  }
   function toLocal(e) {
     var r = canvasRect || canvas.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
@@ -156,7 +165,14 @@
     var m = toLocal(e);
     dot(m[0], m[1], "#ffffff", 0.9);
     if (e.getPredictedEvents) {
-      try { lastPredictedLen = e.getPredictedEvents().length; } catch (_) {}
+      try {
+        var predicted = e.getPredictedEvents();
+        lastPredictedLen = predicted.length;
+        for (var j = 0; j < predicted.length; j++) {
+          var pp = toLocal(predicted[j]);
+          ring(pp[0], pp[1], "#ffcf4d", 3.2);
+        }
+      } catch (_) {}
     }
   }
 
