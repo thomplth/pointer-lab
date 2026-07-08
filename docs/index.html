@@ -128,6 +128,7 @@
   var coalescedTs = [], rawTs = [];
   var lastPointerType = "-";
   var everSawRaw = false;
+  var isDown = false;   // true only while the pen is in contact (not hovering)
 
   // ---- rAF display-rate probe ----
   function raf() { frameCount++; requestAnimationFrame(raf); }
@@ -311,6 +312,7 @@
   function onDown(e) {
     canvasRect = canvas.getBoundingClientRect();
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    isDown = true;
     lastPointerType = e.pointerType || "-";
     resetPredictors();
     var p = toLocal(e);
@@ -319,6 +321,7 @@
   }
 
   function onMove(e) {
+    if (!isDown) return;   // ignore hover — only measure while the pen is in contact
     pmCount++;
     lastPointerType = e.pointerType || "-";
     var coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
@@ -352,6 +355,7 @@
   }
 
   function onRaw(e) {
+    if (!isDown) return;   // ignore hover-phase rawupdate events
     rawCount++;
     everSawRaw = true;
     rawTs.push(e.timeStamp);
@@ -364,6 +368,7 @@
   }
 
   function onUp(e) {
+    isDown = false;
     try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
   }
 
