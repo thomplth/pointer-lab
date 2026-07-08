@@ -53,7 +53,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(browserButton("Open in Chrome", CHROME))
 
         root.addView(TextView(this).apply {
-            text = "Draw with the S-Pen inside the page. Watch the live counters + verdict banner. " +
+            text = "Draw with a stylus inside the page. Watch the live counters + verdict banner. " +
                 "The page mirrors its console output to logcat (tag: chromium)."
             textSize = 13f
             setTextColor(Color.GRAY)

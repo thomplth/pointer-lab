@@ -33,18 +33,20 @@
   .v.cap { color: #ff8a8a; }
   #meta { font-size: 11px; color: #8a8a90; padding: 6px 10px; }
   #meta b { color: #cfcfcf; }
-  .bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
-  button {
+  .bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; flex-wrap: wrap; }
+  button, select {
     background: #26262c; color: #e6e6e6; border: 1px solid #3a3a42; border-radius: 6px;
     padding: 8px 14px; font: inherit; font-size: 13px;
   }
+  select { padding: 7px 8px; }
   button:active { background: #34343c; }
+  label.ctl { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #cfcfcf; }
   #hist { font-size: 11px; color: #b7b7bd; padding: 2px 10px 6px; white-space: pre; }
   #c {
     display: block; width: 100%; height: 42vh; background: #060608;
     border-top: 1px solid #222; border-bottom: 1px solid #222; touch-action: none;
   }
-  .legend { display: flex; gap: 14px; padding: 5px 10px; font-size: 11px; color: #9a9aa2; }
+  .legend { display: flex; gap: 14px; padding: 5px 10px; font-size: 11px; color: #9a9aa2; flex-wrap: wrap; }
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
   #log {
     margin: 0; padding: 6px 10px; font-size: 10.5px; line-height: 1.35;
@@ -54,7 +56,7 @@
 </style>
 </head>
 <body>
-  <div id="verdict" class="grey">Draw continuously with the S-Pen to measure…</div>
+  <div id="verdict" class="grey">Draw continuously with a stylus to measure…</div>
 
   <div class="grid">
     <div class="card"><div class="k">pointermove</div><div class="v" id="pm">0</div><div class="u">events / s</div></div>
@@ -72,6 +74,15 @@
 
   <div class="bar">
     <button id="reset">Reset</button>
+    <label class="ctl"><input type="checkbox" id="predToggle" checked> predict</label>
+    <select id="predAlgo" title="prediction algorithm">
+      <option value="browser">browser · getPredictedEvents()</option>
+      <option value="linear">linear · const-velocity</option>
+      <option value="accel">const-acceleration</option>
+      <option value="lsq" selected>least-squares · deg 2</option>
+      <option value="kalman">Kalman · const-velocity</option>
+      <option value="oneeuro">one-euro</option>
+    </select>
     <span id="secure" style="font-size:12px;color:#9a9aa2"></span>
   </div>
 
@@ -79,7 +90,7 @@
     <span><span class="swatch" style="background:#ffffff"></span>main</span>
     <span><span class="swatch" style="background:#39c5ff"></span>coalesced</span>
     <span><span class="swatch" style="background:#ff4d4d"></span>rawupdate</span>
-    <span><span class="swatch" style="background:transparent;border:2px solid #ffcf4d;width:8px;height:8px"></span>predicted</span>
+    <span id="predLegend"><span class="swatch" id="predSwatch" style="background:transparent;border:2px solid #2ee6c8;width:8px;height:8px"></span><span id="predLabel">predicted · lsq</span></span>
   </div>
   <canvas id="c"></canvas>
   <pre id="log"></pre>
@@ -142,10 +153,166 @@
     return [e.clientX - r.left, e.clientY - r.top];
   }
 
+  // ---- prediction: buffers, tunable filters, and a family of projectors ----
+  // sampleBuf holds recent {t, x, y} in canvas-local coords (oldest → newest).
+  var sampleBuf = [];
+  var HORIZON_MS = 40;   // how far ahead each predictor projects
+  var PRED_STEPS = 4;    // number of rings drawn along the horizon
+  var LSQ_WINDOW = 8;    // samples fed to the least-squares fit
+  // Kalman + one-euro are stateful, so they persist across events and reset per stroke.
+  var KAL_R = 1.0, KAL_SA2 = 5e5;                      // measurement vs process (accel) noise
+  var OE_MINCUT = 1.0, OE_BETA = 0.02, OE_DCUT = 1.0;  // one-euro cutoff / speed coupling
+  var PRED_COLORS = {
+    browser: "#ffcf4d", linear: "#b06dff", accel: "#ff9f1c",
+    lsq: "#2ee6c8", kalman: "#ff5db1", oneeuro: "#c0ff33"
+  };
+  var predEnabled = true, predAlgo = "lsq";
+
+  // 2-state (position, velocity) Kalman filter — one instance per axis.
+  function makeKalman() {
+    var init = false, p = 0, v = 0, lastT = 0;
+    var P00 = 1, P01 = 0, P10 = 0, P11 = 1;
+    return {
+      reset: function () { init = false; p = v = 0; P00 = 1; P01 = P10 = 0; P11 = 1; },
+      update: function (t, z) {
+        if (!init) { p = z; v = 0; lastT = t; init = true; return; }
+        var dt = (t - lastT) / 1000; lastT = t;
+        if (dt <= 0) return;
+        // predict: x = F x
+        var pp = p + v * dt;
+        // P = F P Fᵀ + Q  (Q from a continuous constant-accel noise model)
+        var nP00 = P00 + dt * (P10 + P01) + dt * dt * P11 + KAL_SA2 * dt * dt * dt / 3;
+        var nP01 = P01 + dt * P11 + KAL_SA2 * dt * dt / 2;
+        var nP10 = P10 + dt * P11 + KAL_SA2 * dt * dt / 2;
+        var nP11 = P11 + KAL_SA2 * dt;
+        // update with measurement z (H = [1 0])
+        var S = nP00 + KAL_R, K0 = nP00 / S, K1 = nP10 / S, y = z - pp;
+        p = pp + K0 * y; v = v + K1 * y;
+        P00 = (1 - K0) * nP00; P01 = (1 - K0) * nP01;
+        P10 = nP10 - K1 * nP00; P11 = nP11 - K1 * nP01;
+      },
+      project: function (dts) { return init ? p + v * dts : null; }
+    };
+  }
+
+  // one-euro adaptive low-pass; we reuse its smoothed derivative to extrapolate ahead.
+  function makeOneEuro() {
+    var init = false, xPrev = 0, dxPrev = 0, rawPrev = 0, lastT = 0;
+    function alpha(cut, dt) { var tau = 1 / (2 * Math.PI * cut); return 1 / (1 + tau / dt); }
+    return {
+      reset: function () { init = false; xPrev = dxPrev = rawPrev = 0; },
+      update: function (t, z) {
+        if (!init) { xPrev = rawPrev = z; dxPrev = 0; lastT = t; init = true; return; }
+        var dt = (t - lastT) / 1000; lastT = t;
+        if (dt <= 0) return;
+        var dx = (z - rawPrev) / dt;
+        var ad = alpha(OE_DCUT, dt);
+        dxPrev = ad * dx + (1 - ad) * dxPrev;
+        var a = alpha(OE_MINCUT + OE_BETA * Math.abs(dxPrev), dt);
+        xPrev = a * z + (1 - a) * xPrev;
+        rawPrev = z;
+      },
+      project: function (dts) { return init ? xPrev + dxPrev * dts : null; }
+    };
+  }
+
+  var kfx = makeKalman(), kfy = makeKalman(), oeX = makeOneEuro(), oeY = makeOneEuro();
+  function resetPredictors() {
+    sampleBuf = [];
+    kfx.reset(); kfy.reset(); oeX.reset(); oeY.reset();
+  }
+
+  // --- window-based projectors (operate on sampleBuf; time is relative to newest sample) ---
+  function projLinear(dts) {
+    var n = sampleBuf.length; if (n < 2) return null;
+    var a = sampleBuf[n - 2], b = sampleBuf[n - 1], dt = (b.t - a.t) / 1000;
+    if (dt <= 0) return null;
+    return { x: b.x + (b.x - a.x) / dt * dts, y: b.y + (b.y - a.y) / dt * dts };
+  }
+  function projAccel(dts) {
+    var n = sampleBuf.length; if (n < 3) return null;
+    var a = sampleBuf[n - 3], b = sampleBuf[n - 2], c = sampleBuf[n - 1];
+    var dt1 = (b.t - a.t) / 1000, dt2 = (c.t - b.t) / 1000;
+    if (dt1 <= 0 || dt2 <= 0) return null;
+    function comp(pa, pb, pc) {
+      var v1 = (pb - pa) / dt1, v2 = (pc - pb) / dt2, acc = (v2 - v1) / ((dt1 + dt2) / 2);
+      return pc + v2 * dts + 0.5 * acc * dts * dts;
+    }
+    return { x: comp(a.x, b.x, c.x), y: comp(a.y, b.y, c.y) };
+  }
+  function polyval(c, t) { var r = 0; for (var i = c.length - 1; i >= 0; i--) r = r * t + c[i]; return r; }
+  function polyfit(ts, ys, deg) {
+    var m = deg + 1, n = ts.length, A = [], b = [];
+    for (var i = 0; i < m; i++) {
+      A.push([]);
+      for (var j = 0; j < m; j++) {
+        var s = 0; for (var k = 0; k < n; k++) s += Math.pow(ts[k], i + j);
+        A[i].push(s);
+      }
+      var bi = 0; for (var k2 = 0; k2 < n; k2++) bi += ys[k2] * Math.pow(ts[k2], i);
+      b.push(bi);
+    }
+    // Gaussian elimination with partial pivoting
+    for (var col = 0; col < m; col++) {
+      var piv = col;
+      for (var r = col + 1; r < m; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+      if (Math.abs(A[piv][col]) < 1e-12) return null;
+      if (piv !== col) { var tA = A[piv]; A[piv] = A[col]; A[col] = tA; var tb = b[piv]; b[piv] = b[col]; b[col] = tb; }
+      for (var r2 = 0; r2 < m; r2++) {
+        if (r2 === col) continue;
+        var f = A[r2][col] / A[col][col];
+        for (var cc = col; cc < m; cc++) A[r2][cc] -= f * A[col][cc];
+        b[r2] -= f * b[col];
+      }
+    }
+    var x = []; for (var i2 = 0; i2 < m; i2++) x.push(b[i2] / A[i2][i2]); return x;
+  }
+  function projLSQ(dts) {
+    var n = sampleBuf.length; if (n < 3) return null;
+    var N = Math.min(n, LSQ_WINDOW), start = n - N, tLast = sampleBuf[n - 1].t;
+    var ts = [], xs = [], ys = [];
+    for (var i = start; i < n; i++) { ts.push((sampleBuf[i].t - tLast) / 1000); xs.push(sampleBuf[i].x); ys.push(sampleBuf[i].y); }
+    var cx = polyfit(ts, xs, 2), cy = polyfit(ts, ys, 2);
+    if (!cx || !cy) return null;
+    return { x: polyval(cx, dts), y: polyval(cy, dts) };
+  }
+  // --- stateful projectors ---
+  function projKalman(dts) { var x = kfx.project(dts), y = kfy.project(dts); return (x === null || y === null) ? null : { x: x, y: y }; }
+  function projOneEuro(dts) { var x = oeX.project(dts), y = oeY.project(dts); return (x === null || y === null) ? null : { x: x, y: y }; }
+
+  function getProjector(algo) {
+    return algo === "linear" ? projLinear : algo === "accel" ? projAccel :
+           algo === "lsq" ? projLSQ : algo === "kalman" ? projKalman :
+           algo === "oneeuro" ? projOneEuro : null;
+  }
+  function recentVel() {
+    var n = sampleBuf.length; if (n < 2) return null;
+    var a = sampleBuf[n - 2], b = sampleBuf[n - 1], dt = (b.t - a.t) / 1000;
+    return dt > 0 ? { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt } : null;
+  }
+  // draw the selected model's predicted trail; suppress points that fold backwards (reversal guard)
+  function drawModelPrediction() {
+    var proj = getProjector(predAlgo), n = sampleBuf.length;
+    if (!proj || !n) return;
+    var last = sampleBuf[n - 1], vel = recentVel(), color = PRED_COLORS[predAlgo] || "#ffcf4d";
+    for (var k = 1; k <= PRED_STEPS; k++) {
+      var p = proj(HORIZON_MS / 1000 * (k / PRED_STEPS));
+      if (!p) continue;
+      if (vel && (p.x - last.x) * vel.vx + (p.y - last.y) * vel.vy < 0) continue;
+      ring(p.x, p.y, color, 2.4 + k * 0.3);
+    }
+  }
+  function updatePredLegend() {
+    $("predSwatch").style.borderColor = PRED_COLORS[predAlgo] || "#ffcf4d";
+    $("predLabel").textContent = "predicted · " + predAlgo;
+    $("predLegend").style.opacity = predEnabled ? "1" : "0.35";
+  }
+
   function onDown(e) {
     canvasRect = canvas.getBoundingClientRect();
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
     lastPointerType = e.pointerType || "-";
+    resetPredictors();
     var p = toLocal(e);
     dot(p[0], p[1], "#ffffff", 1.2);
     log("pointerdown type=" + lastPointerType + " secure=" + window.isSecureContext);
@@ -161,18 +328,26 @@
       coalescedTs.push(ce.timeStamp);
       var q = toLocal(ce);
       dot(q[0], q[1], "#39c5ff", 1.5);
+      // feed the prediction buffer + stateful filters with every real sample
+      sampleBuf.push({ t: ce.timeStamp, x: q[0], y: q[1] });
+      if (sampleBuf.length > 16) sampleBuf.shift();
+      kfx.update(ce.timeStamp, q[0]); kfy.update(ce.timeStamp, q[1]);
+      oeX.update(ce.timeStamp, q[0]); oeY.update(ce.timeStamp, q[1]);
     }
     var m = toLocal(e);
     dot(m[0], m[1], "#ffffff", 0.9);
+
+    // browser predicted-event count always feeds the stat card, regardless of overlay
+    var pe = null;
     if (e.getPredictedEvents) {
-      try {
-        var predicted = e.getPredictedEvents();
-        lastPredictedLen = predicted.length;
-        for (var j = 0; j < predicted.length; j++) {
-          var pp = toLocal(predicted[j]);
-          ring(pp[0], pp[1], "#ffcf4d", 3.2);
-        }
-      } catch (_) {}
+      try { pe = e.getPredictedEvents(); lastPredictedLen = pe.length; } catch (_) {}
+    }
+    if (predEnabled) {
+      if (predAlgo === "browser") {
+        if (pe) for (var pi = 0; pi < pe.length; pi++) { var pp = toLocal(pe[pi]); ring(pp[0], pp[1], PRED_COLORS.browser, 3.2); }
+      } else {
+        drawModelPrediction();
+      }
     }
   }
 
@@ -241,7 +416,7 @@
 
   function updateVerdict(pm, co, rw, fps) {
     var v = $("verdict");
-    if (pm < 5) { v.className = "grey"; v.textContent = "Draw continuously with the S-Pen to measure…"; return; }
+    if (pm < 5) { v.className = "grey"; v.textContent = "Draw continuously with a stylus to measure…"; return; }
     var display = fps || 60;
     var best = Math.max(rw, co);
     if (best > 1.8 * display) {
@@ -292,9 +467,13 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     pmCount = coalescedCount = rawCount = frameCount = lastPredictedLen = 0;
     coalescedTs = []; rawTs = []; everSawRaw = false;
+    resetPredictors();
     logLines = []; $("log").textContent = "";
     log("reset");
   });
+
+  $("predToggle").addEventListener("change", function () { predEnabled = this.checked; updatePredLegend(); });
+  $("predAlgo").addEventListener("change", function () { predAlgo = this.value; updatePredLegend(); });
 
   // ---- meta / capability line ----
   function refreshMeta() {
@@ -311,6 +490,7 @@
   window.addEventListener("resize", function () { resize(); refreshMeta(); });
   resize();
   refreshMeta();
+  updatePredLegend();
   log("loaded. secure=" + window.isSecureContext + " ua=" + navigator.userAgent);
 })();
 </script>
