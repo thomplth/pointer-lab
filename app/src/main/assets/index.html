@@ -76,10 +76,10 @@
     <button id="reset">Reset</button>
     <label class="ctl"><input type="checkbox" id="predToggle" checked> predict</label>
     <select id="predAlgo" title="prediction algorithm">
-      <option value="browser">browser · getPredictedEvents()</option>
+      <option value="browser" selected>browser · getPredictedEvents()</option>
       <option value="linear">linear · const-velocity</option>
       <option value="accel">const-acceleration</option>
-      <option value="lsq" selected>least-squares · deg 2</option>
+      <option value="lsq">least-squares · deg 2</option>
       <option value="kalman">Kalman · const-velocity</option>
       <option value="oneeuro">one-euro</option>
     </select>
@@ -90,7 +90,7 @@
     <span><span class="swatch" style="background:#ffffff"></span>main</span>
     <span><span class="swatch" style="background:#39c5ff"></span>coalesced</span>
     <span><span class="swatch" style="background:#ff4d4d"></span>rawupdate</span>
-    <span id="predLegend"><span class="swatch" id="predSwatch" style="background:transparent;border:2px solid #2ee6c8;width:8px;height:8px"></span><span id="predLabel">predicted · lsq</span></span>
+    <span id="predLegend"><span class="swatch" id="predSwatch" style="background:transparent;border:2px solid #ffcf4d;width:8px;height:8px"></span><span id="predLabel">predicted · browser</span></span>
   </div>
   <canvas id="c"></canvas>
   <pre id="log"></pre>
@@ -167,7 +167,7 @@
     browser: "#ffcf4d", linear: "#b06dff", accel: "#ff9f1c",
     lsq: "#2ee6c8", kalman: "#ff5db1", oneeuro: "#c0ff33"
   };
-  var predEnabled = true, predAlgo = "lsq";
+  var predEnabled = true, predAlgo = "browser";
 
   // 2-state (position, velocity) Kalman filter — one instance per axis.
   function makeKalman() {
